@@ -1,0 +1,129 @@
+name: Build deny-joefakri Fluffy Board Android APK
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_branch:
+        description: Branch of deny-joefakri/fluffy_board to build
+        required: true
+        type: choice
+        options:
+          - master
+          - offline
+        default: offline
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout selected branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_branch }}
+
+      - name: Make this build identifiable and add Maven Central
+        shell: bash
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          branch = os.environ['SOURCE_BRANCH']
+
+          app_gradle = Path('android/app/build.gradle')
+          text = app_gradle.read_text()
+          app_id = re.search(r'applicationId\s+["\']([^"\']+)["\']', text)
+          if not app_id:
+              raise SystemExit('Could not find applicationId in android/app/build.gradle')
+          original_id = app_id.group(1)
+          branch_id = f'{original_id}.denyjoefakri.{branch}'
+          text = text[:app_id.start(1)] + branch_id + text[app_id.end(1):]
+          app_gradle.write_text(text)
+          print(f'Application ID: {original_id} -> {branch_id}')
+
+          manifest = Path('android/app/src/main/AndroidManifest.xml')
+          if manifest.exists():
+              text = manifest.read_text()
+              label = re.search(r'android:label="([^"]*)"', text)
+              if label:
+                  original_label = label.group(1)
+                  branch_label = f'{original_label} (deny-joefakri/{branch})'
+                  text = text[:label.start(1)] + branch_label + text[label.end(1):]
+                  manifest.write_text(text)
+                  print(f'App label: {branch_label}')
+              else:
+                  print('Warning: could not find android:label in AndroidManifest.xml')
+
+          # The legacy Android build file only lists Google and JCenter repositories.
+          # Add Maven Central for Kotlin/Android dependencies without editing the repo source.
+          root_gradle = Path('android/build.gradle')
+          text = root_gradle.read_text()
+          if 'mavenCentral()' not in text:
+              text = text.replace('        jcenter()', '        mavenCentral()\n        jcenter()')
+              root_gradle.write_text(text)
+          PY
+
+      - name: Set up Java 17 for Android SDK tools
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Android SDK tools
+        uses: android-actions/setup-android@v4
+        with:
+          packages: ''
+
+      - name: Install Android SDK platform and build tools
+        run: sdkmanager --install "platforms;android-33" "build-tools;33.0.2"
+
+      - name: Set up Java 11 for the project build
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '11'
+
+      - name: Set up Flutter 3.7.12
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.7.12'
+          channel: stable
+          cache: true
+
+      - name: Show toolchain and dependency versions
+        run: |
+          flutter --version
+          java -version
+          grep -E "kotlin_version|com.android.tools.build:gradle" android/build.gradle || true
+          grep "distributionUrl" android/gradle/wrapper/gradle-wrapper.properties
+          grep -A 5 '^  intl:' pubspec.lock || true
+          grep -A 5 '^  pdf:' pubspec.lock || true
+          grep -A 5 '^  xml:' pubspec.lock || true
+
+      - name: Fetch dependencies
+        run: flutter pub get
+
+      - name: Build debug APK
+        run: flutter build apk --debug
+
+      - name: Rename APK for the selected branch
+        shell: bash
+        env:
+          SOURCE_BRANCH: ${{ inputs.source_branch }}
+        run: |
+          mkdir -p dist
+          cp build/app/outputs/flutter-apk/app-debug.apk "dist/fluffy-board-deny-joefakri-${SOURCE_BRANCH}-debug.apk"
+
+      - name: Upload installable APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: fluffy-board-deny-joefakri-${{ inputs.source_branch }}-apk
+          path: dist/*.apk
+          if-no-files-found: error
+          retention-days: 7
